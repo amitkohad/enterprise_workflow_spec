@@ -1,0 +1,62 @@
+# Illustrative only. Namespace/queue/topic names are opaque configuration values.
+# Mount tenant-specific credentials; never put keys/passwords in this file.
+# Input topics are dedicated to tenants. ACLs restrict principals to their topics.
+# Existing namespace/task_queue/output_topic bindings stay immutable through retention/replay.
+schema_version: "1"
+revision: "example-v1"
+tenants:
+  - tenant_id: t-001
+    namespace: tef-t-001-prod
+    credential_profile: temporal-t-001
+  - tenant_id: t-002
+    namespace: tef-t-002-prod
+    credential_profile: temporal-t-002
+consumer_bindings:
+  - tenant_id: t-001
+    input_topic: tef.t-001.workflow-trigger.v1
+    dlq_topic: tef.t-001.workflow-trigger.dlq.v1
+    group_id: tef-t-001-ingestion-v1
+    consumer_profile: kafka-t-001
+  - tenant_id: t-002
+    input_topic: tef.t-002.workflow-trigger.v1
+    dlq_topic: tef.t-002.workflow-trigger.dlq.v1
+    group_id: tef-t-002-ingestion-v1
+    consumer_profile: kafka-t-002
+routes:
+  - tenant_id: t-001
+    domain: payments
+    workflow_type: EnterpriseEventWorkflow
+    namespace: tef-t-001-prod
+    task_queue: tef-t-001-payments-v1
+    input_topic: tef.t-001.workflow-trigger.v1
+    output_topic: tef.t-001.payments.processed.v1
+    dlq_topic: tef.t-001.workflow-trigger.dlq.v1
+    credential_profile: temporal-t-001
+  - tenant_id: t-001
+    domain: fulfillment
+    workflow_type: EnterpriseEventWorkflow
+    namespace: tef-t-001-prod
+    task_queue: tef-t-001-fulfillment-v1
+    input_topic: tef.t-001.workflow-trigger.v1
+    output_topic: tef.t-001.fulfillment.processed.v1
+    dlq_topic: tef.t-001.workflow-trigger.dlq.v1
+    credential_profile: temporal-t-001
+  - tenant_id: t-002
+    domain: payments
+    workflow_type: EnterpriseEventWorkflow
+    namespace: tef-t-002-prod
+    task_queue: tef-t-002-payments-v1
+    input_topic: tef.t-002.workflow-trigger.v1
+    output_topic: tef.t-002.payments.processed.v1
+    dlq_topic: tef.t-002.workflow-trigger.dlq.v1
+    credential_profile: temporal-t-002
+worker_assignments:
+  - namespace: tef-t-001-prod
+    task_queue: tef-t-001-payments-v1
+    workflow_types: [EnterpriseEventWorkflow]
+  - namespace: tef-t-001-prod
+    task_queue: tef-t-001-fulfillment-v1
+    workflow_types: [EnterpriseEventWorkflow]
+  - namespace: tef-t-002-prod
+    task_queue: tef-t-002-payments-v1
+    workflow_types: [EnterpriseEventWorkflow]

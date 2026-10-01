@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://temporal-enterprise-framework.example.invalid/contracts/routing.schema.json",
+  "title": "EnterpriseRoutingConfigurationV1",
+  "description": "Finite routes only. Semantic validation additionally enforces unique route keys, one namespace/credential profile per tenant, distinct namespaces for distinct tenants, one tenant per input topic, exact references, registered workflow types, and retention-safe immutable bindings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "revision", "tenants", "consumer_bindings", "routes", "worker_assignments"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "revision": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"},
+    "tenants": {
+      "type": "array", "minItems": 1, "maxItems": 1000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["tenant_id", "namespace", "credential_profile"],
+        "properties": {
+          "tenant_id": {"$ref": "event-envelope.schema.json#/$defs/OpaqueSlug"},
+          "namespace": {"$ref": "#/$defs/BoundedName"},
+          "credential_profile": {"$ref": "#/$defs/BoundedName"}
+        }
+      }
+    },
+    "consumer_bindings": {
+      "type": "array", "minItems": 1, "maxItems": 1000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["tenant_id", "input_topic", "dlq_topic", "group_id", "consumer_profile"],
+        "properties": {
+          "tenant_id": {"$ref": "event-envelope.schema.json#/$defs/OpaqueSlug"},
+          "input_topic": {"$ref": "#/$defs/BoundedName"},
+          "dlq_topic": {"$ref": "#/$defs/BoundedName"},
+          "group_id": {"$ref": "#/$defs/BoundedName"},
+          "consumer_profile": {"$ref": "#/$defs/BoundedName"}
+        }
+      }
+    },
+    "routes": {
+      "type": "array", "minItems": 1, "maxItems": 10000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["tenant_id", "domain", "workflow_type", "namespace", "task_queue", "input_topic", "output_topic", "dlq_topic", "credential_profile"],
+        "properties": {
+          "tenant_id": {"$ref": "event-envelope.schema.json#/$defs/OpaqueSlug"},
+          "domain": {"$ref": "event-envelope.schema.json#/$defs/OpaqueSlug"},
+          "workflow_type": {"const": "EnterpriseEventWorkflow"},
+          "namespace": {"$ref": "#/$defs/BoundedName"},
+          "task_queue": {"$ref": "#/$defs/BoundedName"},
+          "input_topic": {"$ref": "#/$defs/BoundedName"},
+          "output_topic": {"$ref": "#/$defs/BoundedName"},
+          "dlq_topic": {"$ref": "#/$defs/BoundedName"},
+          "credential_profile": {"$ref": "#/$defs/BoundedName"}
+        }
+      }
+    },
+    "worker_assignments": {
+      "type": "array", "minItems": 1, "maxItems": 10000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["namespace", "task_queue", "workflow_types"],
+        "properties": {
+          "namespace": {"$ref": "#/$defs/BoundedName"},
+          "task_queue": {"$ref": "#/$defs/BoundedName"},
+          "workflow_types": {"type": "array", "minItems": 1, "maxItems": 1, "uniqueItems": true, "items": {"const": "EnterpriseEventWorkflow"}}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "BoundedName": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"}
+  }
+}

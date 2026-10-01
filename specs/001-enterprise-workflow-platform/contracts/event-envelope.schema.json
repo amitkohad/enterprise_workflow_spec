@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://temporal-enterprise-framework.example.invalid/contracts/event-envelope.schema.json",
+  "title": "KafkaWorkflowStartEnvelopeV1",
+  "description": "UTF-8 Kafka value. Kafka key MUST exactly equal message_id. Additional semantic limits: whole value <=262144 bytes, depth <=32, strict RFC8785-compatible JSON, tenant must equal configured topic tenant. No caller-selected namespace/task queue.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "message_id", "tenant_id", "domain", "workflow_type", "payload"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "message_id": {"$ref": "#/$defs/CanonicalUuid"},
+    "tenant_id": {"$ref": "#/$defs/OpaqueSlug"},
+    "domain": {"$ref": "#/$defs/OpaqueSlug"},
+    "workflow_type": {"const": "EnterpriseEventWorkflow"},
+    "payload": {"type": "object", "additionalProperties": true},
+    "traceparent": {"$ref": "#/$defs/TraceParent"}
+  },
+  "$defs": {
+    "CanonicalUuid": {
+      "type": "string",
+      "format": "uuid",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "Opaque lowercase canonical UUID; never embed PII or generate replacement on retry."
+    },
+    "OpaqueSlug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    },
+    "TraceParent": {
+      "type": "string",
+      "minLength": 55,
+      "maxLength": 55,
+      "pattern": "^00-(?!0{32}-)[0-9a-f]{32}-(?!0{16}-)[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "W3C version 00; nonzero trace-id and parent-id. Untrusted correlation only."
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1",
+      "message_id": "7c2fc8ad-5d5e-4d6e-9f04-66c8fb2c1e44",
+      "tenant_id": "t-001",
+      "domain": "payments",
+      "workflow_type": "EnterpriseEventWorkflow",
+      "payload": {"operation": "reconcile", "reference": "opaque-ref-42"},
+      "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    }
+  ]
+}

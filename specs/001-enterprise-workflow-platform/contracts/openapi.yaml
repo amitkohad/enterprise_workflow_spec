@@ -1,0 +1,646 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: Temporal Enterprise Framework
+  version: 1.0.0
+  description: |
+    One application image with INGESTION and WORKER roles. Business routes are
+    enabled only for INGESTION. Both roles expose management health and application
+    metrics on port 8080; WORKER SDK metrics have port 9090. Dependencies are external.
+
+    POST starts asynchronously and never waits for workflow completion. Caller
+    supplies a stable UUID Idempotency-Key; workflow_id exactly equals that key.
+    Duplicate recognition is limited to retained Temporal history. All routing
+    comes from a finite trusted inventory. Callers cannot supply a namespace,
+    task queue, topic, timeout, retry policy, or arbitrary workflow name.
+
+    REST JSON bodies are UTF-8, maximum 262144 bytes and depth 32. Parse strictly:
+    no duplicate object keys, non-finite numbers, lone surrogates, or integers
+    outside the IEEE754 safe integer range. Use RFC8785 canonicalization for
+    identity digest; JSON Schema alone does not enforce these semantic rules.
+    Request content encoding must be identity; compressed bodies are rejected.
+
+    JWT access tokens are verified against a configured external OIDC issuer,
+    audience, signing algorithm allowlist and bounded JWKS cache. Required
+    scopes AND tenant/domain grants are checked before any Temporal RPC.
+    Error messages are sanitized and never include business payloads, secrets,
+    internal namespaces, stack traces, or untrusted exception text.
+servers:
+  - url: https://gateway.example.invalid
+    description: Replace with production INGESTION origin; ingress requires TLS
+security:
+  - oidc: []
+tags:
+  - name: workflows
+  - name: management
+paths:
+  /v1/workflows/start:
+    post:
+      tags: [workflows]
+      operationId: startWorkflow
+      summary: Durably accept a workflow start intent
+      description: |
+        Required scope workflows:start and a verified grant matching tenant_id
+        and domain. Idempotency-Key is mandatory; retain it for all retries of
+        this logical request. Missing or invalid keys return 400.
+
+        Start uses WorkflowIDConflictPolicy.FAIL and
+        WorkflowIDReusePolicy.REJECT_DUPLICATE. On an already-started conflict,
+        describe and decode encrypted enterprise_identity_v1 memo; compare
+        digest, tenant/domain, type, and namespace/queue/output-topic binding. Only a verified
+        equivalent request returns 200. Missing/mismatching memo returns 409.
+        Dependency/key unavailability during reconciliation returns 503.
+
+        An ambiguous start response may mean the execution was accepted. Retry
+        with the same key after 503. This operation never generates a substitute
+        workflow ID, terminates an existing execution, or waits for completion.
+        Unknown route/workflow type is 422 after authorization; insufficient
+        grant is generic 403. traceparent is untrusted correlation only.
+      security:
+        - oidc: [workflows:start]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/TraceParent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartWorkflowRequest'
+            examples:
+              reference:
+                value:
+                  tenant_id: t-001
+                  domain: payments
+                  workflow_type: EnterpriseEventWorkflow
+                  payload:
+                    operation: reconcile
+                    reference: opaque-ref-42
+      responses:
+        '202':
+          description: New execution durably started; no completion guarantee
+          headers:
+            Location:
+              $ref: '#/components/headers/StatusLocation'
+            Idempotent-Replayed:
+              description: False for a newly accepted start
+              schema: {type: string, const: 'false'}
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartWorkflowResponse'
+              example:
+                workflow_id: 7c2fc8ad-5d5e-4d6e-9f04-66c8fb2c1e44
+                run_id: 10bf53ef-0d58-4cae-a8fb-f1af73cf2a7e
+                workflow_type: EnterpriseEventWorkflow
+                acceptance: STARTED
+        '200':
+          description: Equivalent retained execution verified using encrypted memo
+          headers:
+            Location:
+              $ref: '#/components/headers/StatusLocation'
+            Idempotent-Replayed:
+              description: True only after verified duplicate comparison
+              schema: {type: string, const: 'true'}
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartWorkflowResponse'
+              example:
+                workflow_id: 7c2fc8ad-5d5e-4d6e-9f04-66c8fb2c1e44
+                run_id: 10bf53ef-0d58-4cae-a8fb-f1af73cf2a7e
+                workflow_type: EnterpriseEventWorkflow
+                acceptance: ALREADY_EXISTS
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Existing ID is not proven to represent this same request
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: IDEMPOTENCY_CONFLICT
+                  message: This idempotency key conflicts with an existing request.
+                  request_id: 1a6a4eac-4b03-4754-afb0-f10e23fe5d65
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedRepresentation'
+        '422':
+          $ref: '#/components/responses/ValidationFailure'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/workflows/{workflow_id}:
+    get:
+      tags: [workflows]
+      operationId: getWorkflowStatus
+      summary: Read status and optionally a completed result
+      description: |
+        Require workflows:read plus tenant/domain grant. When include_result is
+        true also require workflows:result even if the selected run is not yet
+        completed. Authenticate before lookup. Unauthorized tenant/domain,
+        wrong route identity memo, absent execution, or mismatched run returns
+        the same generic 404; do not reveal another tenant's existence.
+
+        Resolve namespace from tenant_id/domain. Validate workflow type and
+        decrypted memo identity after describe. An explicit run_id binds that run.
+        Without run_id, supported SDK semantics resolve the latest run in the
+        execution chain. Use the exact ID returned by describe for any result
+        RPC with run following disabled; do not implement unbounded chain loops.
+        Return result
+        only if requested, authorized, and the selected run is COMPLETED. Never
+        wait for completion. Result fetch/decode uses a bounded deadline; failure
+        returns 503 with no raw Temporal/cryptographic exception.
+      security:
+        - oidc: [workflows:read]
+      x-conditional-scopes:
+        include_result=true: [workflows:result]
+      parameters:
+        - name: workflow_id
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/CanonicalUuid'
+        - name: tenant_id
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/OpaqueSlug'
+        - name: domain
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/OpaqueSlug'
+        - name: run_id
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/CanonicalUuid'
+        - name: include_result
+          in: query
+          required: false
+          schema: {type: boolean, default: false}
+          description: Requires workflows:result in addition to workflows:read
+        - $ref: '#/components/parameters/TraceParent'
+      responses:
+        '200':
+          description: Authorized status for the selected retained run
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowStatusResponse'
+              examples:
+                running:
+                  value:
+                    workflow_id: 7c2fc8ad-5d5e-4d6e-9f04-66c8fb2c1e44
+                    run_id: 10bf53ef-0d58-4cae-a8fb-f1af73cf2a7e
+                    workflow_type: EnterpriseEventWorkflow
+                    status: RUNNING
+                    result_available: false
+                completedWithResult:
+                  value:
+                    workflow_id: 7c2fc8ad-5d5e-4d6e-9f04-66c8fb2c1e44
+                    run_id: 10bf53ef-0d58-4cae-a8fb-f1af73cf2a7e
+                    workflow_type: EnterpriseEventWorkflow
+                    status: COMPLETED
+                    result_available: true
+                    result:
+                      publish_id: 7c2fc8ad-5d5e-4d6e-9f04-66c8fb2c1e44:publish:0
+                      topic: tef.t-001.payments.processed.v1
+                      partition: 0
+                      offset: 42
+                      status: published
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Absent, ungranted, or mismatched execution; identical sanitized response
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: Workflow not found.
+                  request_id: 1a6a4eac-4b03-4754-afb0-f10e23fe5d65
+        '422':
+          $ref: '#/components/responses/ValidationFailure'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /health/live:
+    get:
+      tags: [management]
+      operationId: getLiveness
+      summary: Process and event-loop health
+      description: |
+        Both roles, port 8080. Restricted by cluster network policy. Does not test
+        external dependency availability. No secret, payload, or detailed error
+        information. A process unable to serve this endpoint fails the probe.
+      servers:
+        - url: http://127.0.0.1:8080
+      security: []
+      responses:
+        '200':
+          description: Process is live
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: {const: ok}
+  /health/ready:
+    get:
+      tags: [management]
+      operationId: getReadiness
+      summary: Role can accept its required work
+      description: |
+        Both roles, port 8080. Reflect initialization, validated credentials and
+        routes, required supervised subsystem health, dependency readiness,
+        worker pollers/consumer readiness, and admission/drain state. During
+        startup, shutdown, or fatal subsystem failure return 503. Dependency
+        outages affect readiness; they do not by themselves fail liveness.
+      servers:
+        - url: http://127.0.0.1:8080
+      security: []
+      responses:
+        '200':
+          description: Role is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: {const: ready}
+        '503':
+          description: Role is initializing, draining, or unable to accept required work
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: {const: not_ready}
+  /health/startup:
+    get:
+      tags: [management]
+      operationId: getStartup
+      summary: Role initialization has completed
+      description: |
+        Both roles, port 8080. Return 503 until validated configuration,
+        certificates/keys, client initialization, and required supervised
+        subsystem startup have completed. Once successful the startup probe
+        remains satisfied; later dependency loss is handled by readiness.
+      servers:
+        - url: http://127.0.0.1:8080
+      security: []
+      responses:
+        '200':
+          description: Initialization completed
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: {const: started}
+        '503':
+          description: Initialization not complete
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: {const: starting}
+  /metrics:
+    get:
+      tags: [management]
+      operationId: getMetrics
+      summary: Prometheus scrape endpoint
+      description: |
+        Application metrics for both roles on port 8080, with a separate worker
+        SDK/runtime exporter on port 9090. Scrape both worker ports. Restricted
+        by cluster network; do not publish either at the public ingress.
+        Never use workflow IDs, message IDs, trace IDs,
+        subjects, payloads, or arbitrary exception text as metric labels.
+      servers:
+        - url: http://127.0.0.1:8080
+          description: Application metrics, both roles
+        - url: http://127.0.0.1:9090
+          description: Temporal SDK/runtime metrics, WORKER role only
+      security: []
+      responses:
+        '200':
+          description: Prometheus-compatible exposition
+          content:
+            'text/plain; version=0.0.4; charset=utf-8':
+              schema: {type: string}
+components:
+  securitySchemes:
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://identity.example.invalid/.well-known/openid-configuration
+      description: |
+        Deployment replaces this URL and configures exact issuer/audience,
+        algorithm allowlist and tenant/domain claim mapping. Bearer access JWT
+        required. Framework does not provide token issuance or password login.
+        Scopes workflows:start, workflows:read, workflows:result are independent.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Stable opaque canonical lowercase UUID. Exactly the workflow_id. Missing
+        or invalid header returns 400; retain same value after timeout/503.
+      schema:
+        $ref: '#/components/schemas/CanonicalUuid'
+      example: 7c2fc8ad-5d5e-4d6e-9f04-66c8fb2c1e44
+    TraceParent:
+      name: traceparent
+      in: header
+      required: false
+      description: |
+        Optional W3C version 00 correlation context. Reject malformed supplied
+        value with 400. Excluded from idempotency digest; no authorization meaning.
+      schema:
+        $ref: '#/components/schemas/TraceParent'
+  headers:
+    StatusLocation:
+      description: |
+        Relative status URI containing workflow_id and tenant_id/domain/run_id
+        query values for the accepted execution. Does not grant authorization.
+      schema: {type: string, format: uri-reference}
+      example: /v1/workflows/7c2fc8ad-5d5e-4d6e-9f04-66c8fb2c1e44?tenant_id=t-001&domain=payments&run_id=10bf53ef-0d58-4cae-a8fb-f1af73cf2a7e
+    NoStore:
+      description: Do not cache API responses containing workflow metadata/results
+      schema: {type: string, const: no-store}
+    RetryAfter:
+      description: Bounded retry delay in seconds; retry start with SAME Idempotency-Key
+      schema: {type: string, pattern: '^[1-9][0-9]{0,2}$'}
+      example: '1'
+  schemas:
+    CanonicalUuid:
+      type: string
+      format: uuid
+      minLength: 36
+      maxLength: 36
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    OpaqueSlug:
+      type: string
+      minLength: 1
+      maxLength: 63
+      pattern: '^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$'
+    TraceParent:
+      type: string
+      minLength: 55
+      maxLength: 55
+      pattern: '^00-(?!0{32}-)[0-9a-f]{32}-(?!0{16}-)[0-9a-f]{16}-[0-9a-f]{2}$'
+    StartWorkflowRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, domain, workflow_type, payload]
+      properties:
+        tenant_id:
+          $ref: '#/components/schemas/OpaqueSlug'
+        domain:
+          $ref: '#/components/schemas/OpaqueSlug'
+        workflow_type:
+          type: string
+          const: EnterpriseEventWorkflow
+        payload:
+          type: object
+          additionalProperties: true
+          description: JSON business input; subject to shared byte/depth/JCS validation
+    StartWorkflowResponse:
+      type: object
+      additionalProperties: false
+      required: [workflow_id, run_id, workflow_type, acceptance]
+      properties:
+        workflow_id:
+          $ref: '#/components/schemas/CanonicalUuid'
+        run_id:
+          $ref: '#/components/schemas/CanonicalUuid'
+        workflow_type:
+          const: EnterpriseEventWorkflow
+        acceptance:
+          enum: [STARTED, ALREADY_EXISTS]
+      description: acceptance is STARTED for 202, ALREADY_EXISTS for verified 200
+    WorkflowStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [workflow_id, run_id, workflow_type, status, result_available]
+      properties:
+        workflow_id:
+          $ref: '#/components/schemas/CanonicalUuid'
+        run_id:
+          $ref: '#/components/schemas/CanonicalUuid'
+        workflow_type:
+          const: EnterpriseEventWorkflow
+        status:
+          enum: [RUNNING, COMPLETED, FAILED, CANCELED, TERMINATED, TIMED_OUT, CONTINUED_AS_NEW]
+        result_available:
+          type: boolean
+        result:
+          $ref: '#/components/schemas/PublishReceipt'
+        error:
+          $ref: '#/components/schemas/WorkflowStateError'
+      allOf:
+        - if:
+            properties:
+              status: {const: COMPLETED}
+          then:
+            properties:
+              result_available: {const: true}
+          else:
+            properties:
+              result_available: {const: false}
+            not:
+              required: [result]
+        - if:
+            properties:
+              status: {enum: [FAILED, CANCELED, TERMINATED, TIMED_OUT]}
+          then: {}
+          else:
+            not:
+              required: [error]
+      description: |
+        result optional only for COMPLETED and authorized include_result=true;
+        result_available true for COMPLETED even when result not requested.
+    WorkflowStateError:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          enum: [WORKFLOW_FAILED, WORKFLOW_CANCELED, WORKFLOW_TERMINATED, WORKFLOW_TIMED_OUT]
+        message:
+          type: string
+          maxLength: 128
+          description: Fixed message derived only from status; never serialized Temporal failure details
+    PublishReceipt:
+      type: object
+      additionalProperties: false
+      required: [publish_id, topic, partition, offset, status]
+      properties:
+        publish_id:
+          type: string
+          minLength: 46
+          maxLength: 46
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:publish:0$'
+          description: Must equal workflow_id + ':publish:0'; stable across retries
+        topic:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]*$'
+          description: Configured output topic for authorized tenant/domain route
+        partition:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+        offset:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9223372036854775807
+          description: Broker-assigned int64 metadata; use lossless integer parsing
+        status:
+          const: published
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, request_id]
+          properties:
+            code:
+              enum: [INVALID_REQUEST, INVALID_IDEMPOTENCY_KEY, INVALID_TRACE_CONTEXT, UNAUTHENTICATED, FORBIDDEN, NOT_FOUND, ROUTE_NOT_ALLOWED, IDEMPOTENCY_CONFLICT, PAYLOAD_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE, UNSUPPORTED_CONTENT_ENCODING, RATE_LIMITED, CAPACITY_EXCEEDED, DEPENDENCY_UNAVAILABLE, INTERNAL_ERROR]
+            message:
+              type: string
+              maxLength: 256
+              description: Sanitized constant/template; no caller payload or dependency exception text
+            request_id:
+              $ref: '#/components/schemas/CanonicalUuid'
+  responses:
+    BadRequest:
+      description: Missing/invalid idempotency key, invalid trace context, or malformed strict JSON
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthenticated:
+      description: Missing or invalid bearer access JWT
+      headers:
+        WWW-Authenticate:
+          schema: {type: string, const: Bearer}
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Valid identity lacks required scope; POST may also lack tenant/domain grant
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    PayloadTooLarge:
+      description: Request exceeds UTF-8 262144-byte or encoded Payload 524288-byte ceiling
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UnsupportedRepresentation:
+      description: Content-Type other than application/json or non-identity Content-Encoding
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationFailure:
+      description: Invalid body/query shape, excessive JSON nesting, or unconfigured start route/type
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RateLimited:
+      description: Tenant quota or bounded local admission capacity reached; no start accepted
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unavailable:
+      description: |
+        Dependency/codec/key unavailable, bounded RPC deadline exceeded, or start
+        acceptance remains ambiguous. Start retry MUST reuse the same key.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: Unexpected sanitized internal error; never return raw exception details
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

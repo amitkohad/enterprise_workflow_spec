@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://temporal-enterprise-framework.example.invalid/contracts/dlq-record.schema.json",
+  "title": "MetadataOnlyDlqRecordV1",
+  "description": "No original payload, raw key, JWT, arbitrary headers, digest, exception message, or stack permitted. tenant_id is copied from trusted topic route. message_id is included only if validated. Kafka key is topic + ':' + partition + ':' + offset. Source offset cannot be committed until delivery callback succeeds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "reason_code", "source", "observed_at", "tenant_id"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "reason_code": {
+      "enum": ["INVALID_JSON", "SCHEMA_INVALID", "UNSUPPORTED_SCHEMA_VERSION", "MESSAGE_KEY_INVALID", "MESSAGE_KEY_MISMATCH", "TENANT_MISMATCH", "ROUTE_NOT_ALLOWED", "PAYLOAD_TOO_LARGE", "DEPTH_EXCEEDED", "IDEMPOTENCY_CONFLICT", "TOMBSTONE"]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["topic", "partition", "offset"],
+      "properties": {
+        "topic": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"},
+        "partition": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "offset": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807}
+      }
+    },
+    "observed_at": {"type": "string", "format": "date-time", "pattern": "Z$", "maxLength": 35},
+    "tenant_id": {"$ref": "event-envelope.schema.json#/$defs/OpaqueSlug"},
+    "message_id": {"$ref": "event-envelope.schema.json#/$defs/CanonicalUuid"}
+  },
+  "examples": [
+    {
+      "schema_version": "1",
+      "reason_code": "MESSAGE_KEY_MISMATCH",
+      "source": {"topic": "tef.t-001.workflow-trigger.v1", "partition": 0, "offset": 42},
+      "observed_at": "2026-10-01T00:00:00Z",
+      "tenant_id": "t-001",
+      "message_id": "7c2fc8ad-5d5e-4d6e-9f04-66c8fb2c1e44"
+    }
+  ]
+}

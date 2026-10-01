@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://temporal-enterprise-framework.example.invalid/contracts/outbound-event.schema.json",
+  "title": "WorkflowProcessedEventV1",
+  "description": "Reference workflow publication before workflow completion. Kafka key equals publish_id. Cross-field rules: workflow_id == message_id; publish_id == workflow_id + ':publish:0'. Maximum UTF-8 event bytes 262144. Activity retry can publish duplicates; downstream deduplication by composite (tenant_id, publish_id) required. Same UUID is valid across tenant namespaces; output-topic separation cannot be assumed after aggregation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_type", "message_id", "workflow_id", "tenant_id", "domain", "workflow_type", "publish_id", "result"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "event_type": {"const": "workflow.processed"},
+    "message_id": {"$ref": "event-envelope.schema.json#/$defs/CanonicalUuid"},
+    "workflow_id": {"$ref": "event-envelope.schema.json#/$defs/CanonicalUuid"},
+    "tenant_id": {"$ref": "event-envelope.schema.json#/$defs/OpaqueSlug"},
+    "domain": {"$ref": "event-envelope.schema.json#/$defs/OpaqueSlug"},
+    "workflow_type": {"const": "EnterpriseEventWorkflow"},
+    "publish_id": {
+      "type": "string",
+      "minLength": 46,
+      "maxLength": 46,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:publish:0$"
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {"status": {"const": "processed"}}
+    },
+    "traceparent": {"$ref": "event-envelope.schema.json#/$defs/TraceParent"}
+  },
+  "examples": [
+    {
+      "schema_version": "1",
+      "event_type": "workflow.processed",
+      "message_id": "7c2fc8ad-5d5e-4d6e-9f04-66c8fb2c1e44",
+      "workflow_id": "7c2fc8ad-5d5e-4d6e-9f04-66c8fb2c1e44",
+      "tenant_id": "t-001",
+      "domain": "payments",
+      "workflow_type": "EnterpriseEventWorkflow",
+      "publish_id": "7c2fc8ad-5d5e-4d6e-9f04-66c8fb2c1e44:publish:0",
+      "result": {"status": "processed"}
+    }
+  ]
+}
